@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -43,53 +44,83 @@ def run_ddcutil(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def command_error(result: subprocess.CompletedProcess[str]) -> str:
+    details = (result.stderr or result.stdout).strip()
+    if details:
+        return details
+    return f"ddcutil exited with status {result.returncode}."
+
+
 def get_display_numbers() -> list[int]:
     result = run_ddcutil("detect", "--terse")
-    displays: list[int] = []
+    if result.returncode != 0:
+        raise RuntimeError(f"Unable to detect monitors: {command_error(result)}")
 
+    displays: list[int] = []
     for line in result.stdout.splitlines():
-        if line.startswith("Display "):
-            display = line.split(":", 1)[0].removeprefix("Display ").strip()
-            if display.isdigit():
-                displays.append(int(display))
+        match = re.match(r"^Display\s+(\d+)\b", line)
+        if match:
+            displays.append(int(match.group(1)))
 
     return displays
 
 
 def get_monitor_name(display: int) -> str:
     result = run_ddcutil("detect")
-    found = False
+    if result.returncode != 0:
+        return f"Display {display}"
 
+    found = False
     for line in result.stdout.splitlines():
-        if line == f"Display {display}":
+        if re.match(rf"^Display\s+{display}\s*$", line):
             found = True
             continue
 
-        if found and line.startswith("   Model:"):
-            return line.split(":", 1)[1].strip()
+        if found:
+            match = re.match(r"^\s*Model:\s*(.+?)\s*$", line)
+            if match:
+                return match.group(1)
 
-        if found and line.startswith("Display "):
-            break
+            if re.match(r"^Display\s+\d+\b", line):
+                break
 
     return f"Display {display}"
+
+
+def parse_terse_brightness(output: str) -> tuple[int, int] | None:
+    """Parse ddcutil's continuous-feature terse format: VCP 10 C CUR MAX."""
+    for line in output.splitlines():
+        match = re.match(
+            r"^\s*VCP\s+(?:0x)?10\s+C\s+(\d+)\s+(\d+)\b",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
 
 
 def get_brightness(display: int) -> tuple[int, int] | None:
     result = run_ddcutil("--display", str(display), "getvcp", "10", "--terse")
     if result.returncode != 0:
         return None
-
-    parts = result.stdout.strip().split()
-    if len(parts) < 3:
-        return None
-
-    return int(parts[1]), int(parts[2])
+    return parse_terse_brightness(result.stdout)
 
 
 def brightness_to_percent(current: int, minimum: int, maximum: int) -> int:
     if maximum <= minimum:
-        return current
-    return round(((current - minimum) / (maximum - minimum)) * 100)
+        return max(0, min(100, current))
+    return max(
+        0,
+        min(100, round(((current - minimum) / (maximum - minimum)) * 100)),
+    )
+
+
+def percent_to_monitor_value(percent: int, minimum: int, maximum: int) -> int:
+    percent = max(0, min(100, percent))
+    if maximum <= minimum:
+        return percent
+    return round(minimum + ((maximum - minimum) * (percent / 100.0)))
 
 
 def list_monitors() -> list[Monitor]:
@@ -126,12 +157,14 @@ def list_monitors() -> list[Monitor]:
     return monitors
 
 
-def set_brightness(display: int, value: int) -> None:
+def set_brightness(display: int, percent: int, minimum: int, maximum: int) -> None:
+    value = percent_to_monitor_value(percent, minimum, maximum)
     result = run_ddcutil("--display", str(display), "setvcp", "10", str(value))
     if result.returncode != 0:
         raise RuntimeError(
-            "Failed to set brightness. The monitor may not support DDC/CI "
-            "brightness control, or DDC/CI may be disabled in the monitor menu."
+            "Failed to set brightness: "
+            f"{command_error(result)}\n"
+            "Check DDC/CI, I2C permissions, and the monitor connection."
         )
 
 
@@ -179,7 +212,7 @@ class MonitorBrightnessApp:
         self.brightness_scale.grid(row=1, column=1, padx=(12, 8), sticky="ew", pady=(16, 0))
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(main, textvariable=self.status_var).grid(
+        ttk.Label(main, textvariable=self.status_var, wraplength=410).grid(
             row=2, column=0, columnspan=3, sticky="w", pady=(16, 0)
         )
 
@@ -198,7 +231,16 @@ class MonitorBrightnessApp:
         self.updating = True
 
         try:
-            self.monitors = list_monitors()
+            try:
+                self.monitors = list_monitors()
+            except RuntimeError as exc:
+                self.monitors = []
+                self.monitor_combo["values"] = []
+                self.monitor_combo.set("")
+                self.brightness_scale.state(["disabled"])
+                self.set_status(str(exc))
+                return
+
             labels: list[str] = []
 
             for monitor in self.monitors:
@@ -212,7 +254,10 @@ class MonitorBrightnessApp:
             if not self.monitors:
                 self.monitor_combo.set("")
                 self.brightness_scale.state(["disabled"])
-                self.set_status("No DDC/CI-capable monitors detected.")
+                self.set_status(
+                    "No DDC/CI-capable external monitors detected. "
+                    "Run 'ddcutil detect' in a terminal for diagnostics."
+                )
                 return
 
             self.monitor_combo.current(0)
@@ -231,7 +276,10 @@ class MonitorBrightnessApp:
         try:
             if not monitor.brightness_supported:
                 self.brightness_scale.state(["disabled"])
-                self.set_status("Selected monitor does not support brightness control.")
+                self.set_status(
+                    "Selected monitor did not return VCP brightness (0x10). "
+                    "Check DDC/CI and try 'ddcutil getvcp 10' in a terminal."
+                )
                 return
 
             self.brightness_scale.state(["!disabled"])
@@ -263,7 +311,17 @@ class MonitorBrightnessApp:
             return
 
         try:
-            set_brightness(monitor.display, percent)
+            set_brightness(
+                monitor.display,
+                percent,
+                monitor.min_brightness,
+                monitor.max_brightness,
+            )
+            monitor.current_brightness = percent_to_monitor_value(
+                percent,
+                monitor.min_brightness,
+                monitor.max_brightness,
+            )
             self.set_status(f"Brightness set to {percent}% on {monitor.name}.")
         except RuntimeError as exc:
             self.set_status(str(exc))

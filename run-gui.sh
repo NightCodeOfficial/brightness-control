@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Activate / use the project venv and launch the Linux brightness GUI.
-# On VirtualBox shared folders, .venv often cannot be created (symlink
-# failures), so this falls back to ~/venvs/monitor-brightness.
+# Activate / use a project venv and launch the Linux brightness GUI.
+# On shared folders, .venv may not support Python's symlinks, so this falls
+# back to ~/venvs/monitor-brightness.
 
 set -euo pipefail
 
@@ -11,6 +11,10 @@ GUI_SCRIPT="$PROJECT_ROOT/monitor-brightness-gui.py"
 REQUIREMENTS_FILE="$PROJECT_ROOT/requirements.txt"
 LOCAL_VENV="$PROJECT_ROOT/.venv"
 FALLBACK_VENV="${MONITOR_BRIGHTNESS_VENV:-$HOME/venvs/monitor-brightness}"
+
+log() {
+    echo "$@" >&2
+}
 
 find_venv_python() {
     local candidate
@@ -23,6 +27,35 @@ find_venv_python() {
     return 1
 }
 
+create_fallback_venv() {
+    log "==> No usable venv found."
+    log "==> Creating fallback venv at $FALLBACK_VENV"
+
+    mkdir -p "$(dirname "$FALLBACK_VENV")"
+
+    if ! python3 -m venv "$FALLBACK_VENV"; then
+        log
+        log "Error: Python could not create a virtual environment."
+        log "On Debian/Ubuntu, install venv support with:"
+        log "  sudo apt install python3-venv"
+        return 1
+    fi
+
+    local py="$FALLBACK_VENV/bin/python"
+    if [[ ! -x "$py" ]]; then
+        log "Error: Virtual environment creation did not produce $py"
+        return 1
+    fi
+
+    "$py" -m pip install --upgrade pip >&2
+    if [[ -f "$REQUIREMENTS_FILE" ]]; then
+        "$py" -m pip install -r "$REQUIREMENTS_FILE" >&2
+    fi
+
+    # stdout is intentionally reserved for the path returned to the caller.
+    echo "$py"
+}
+
 ensure_venv() {
     local venv_python
     if venv_python="$(find_venv_python)"; then
@@ -30,19 +63,7 @@ ensure_venv() {
         return 0
     fi
 
-    echo "==> No usable venv found (shared folders often block .venv symlinks)."
-    echo "==> Creating fallback venv at $FALLBACK_VENV"
-
-    mkdir -p "$(dirname "$FALLBACK_VENV")"
-    python3 -m venv "$FALLBACK_VENV"
-
-    local py="$FALLBACK_VENV/bin/python"
-    "$py" -m pip install --upgrade pip
-    if [[ -f "$REQUIREMENTS_FILE" ]]; then
-        "$py" -m pip install -r "$REQUIREMENTS_FILE"
-    fi
-
-    echo "$py"
+    create_fallback_venv
 }
 
 main() {
@@ -56,12 +77,17 @@ main() {
         exit 1
     fi
 
-    local venv_python
-    venv_python="$(ensure_venv)"
+    if ! command -v ddcutil >/dev/null; then
+        echo "Error: ddcutil not found. Run ./install-deps.sh first." >&2
+        exit 1
+    fi
 
-    # shellcheck disable=SC1091
-    source "$(dirname "$venv_python")/activate"
-    exec python "$GUI_SCRIPT" "$@"
+    local venv_python
+    if ! venv_python="$(ensure_venv)"; then
+        exit 1
+    fi
+
+    exec "$venv_python" "$GUI_SCRIPT" "$@"
 }
 
 main "$@"

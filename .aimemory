@@ -1,0 +1,56 @@
+# AI Project Memory
+
+> This file is maintained by TransferLoop. It gives a new AI conversation project context and a concise history of changes that were actually accepted into the local project.
+
+## Project Overview
+
+**Project:** brightness_controller
+
+brightness_controller is a software project managed with TransferLoop. No custom project description has been entered yet; inspect the current files for authoritative implementation details.
+
+## Technical Snapshot
+
+- Primary technologies detected: Python
+
+## Important Memory Rules
+
+- Current project files are authoritative if this memory ever becomes stale.
+- Change-history entries below describe changes accepted through TransferLoop, not merely changes an AI proposed.
+- AI assistants should not modify this file during normal implementation work unless the user explicitly asks them to.
+
+## Accepted Change History
+
+<!-- TL:MEMORY-ENTRY -->
+### 2026-09-02 00:27 — Fix Linux brightness detection/parsing, percentage scaling, first-run GUI venv startup, and Linux dependency/diagnostic setup.
+
+**Accepted changes**
+
+- **Modified:** `install-deps.sh`
+  - Make Linux setup more robust on normal and shared filesystems.
+  - Installs i2c-tools with ddcutil for diagnostics.
+  - Falls back to a home-directory venv if the project filesystem cannot host one.
+  - Attempts to load i2c-dev for older distribution setups.
+  - Prints direct ddcutil test commands after setup.
+- **Modified:** `monitor-brightness-gui.py`
+  - Correct ddcutil parsing and brightness scaling and improve Linux error reporting.
+  - Parses documented terse output such as 'VCP 10 C 50 100'.
+  - Scales 0-100 GUI percentages to the monitor's native VCP maximum.
+  - Handles monitor detection failures without crashing the Tkinter startup path.
+  - Makes monitor model parsing tolerant of ddcutil indentation.
+- **Modified:** `monitor-brightness.sh`
+  - Correct ddcutil CLI parsing and percentage scaling and preserve diagnostic errors.
+  - Reads current/max from fields 4 and 5 of continuous VCP terse output.
+  - Maps requested percentages to the monitor's native maximum.
+  - Validates brightness and monitor-index input.
+  - Surfaces ddcutil detection/set errors instead of discarding them.
+- **Modified:** `README.md`
+  - Update Linux setup and troubleshooting for ddcutil behavior and environment limitations.
+  - Documents expected terse brightness output.
+  - Clarifies modern udev permissions versus the legacy i2c-group method.
+  - Clarifies external-monitor scope, built-in laptop panels, and VM limitations.
+  - Adds ddcutil environment diagnostics.
+- **Modified:** `run-gui.sh`
+  - Fix first-run fallback virtual-environment launch behavior.
+  - Keeps setup/log output on stderr so command substitution receives only the Python path.
+  - Executes the selected venv Python directly instead of sourcing activate.
+  - Adds clearer errors for missing ddcutil and missing python3-venv support.

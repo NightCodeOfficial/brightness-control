@@ -17,19 +17,35 @@ chmod +x install-deps.sh run-gui.sh monitor-brightness.sh monitor-brightness-gui
 
 This installs system packages (`python3`, `python3-tk`, `ddcutil`, and related tools) via your package manager. Enter your password if `sudo` asks.
 
-### 2. Allow I2C access
+### 2. Confirm DDC/I2C access
 
-`ddcutil` needs permission to talk to the monitor:
+Modern `ddcutil` packages normally install the needed `i2c-dev` module setup and
+udev permissions automatically. Confirm that the monitor is visible:
+
+```bash
+ddcutil detect
+ddcutil getvcp 10 --terse
+```
+
+For a working brightness feature, the second command should return a continuous
+VCP value similar to:
+
+```text
+VCP 10 C 50 100
+```
+
+If `ddcutil` works with `sudo` but not as your normal user, run:
+
+```bash
+ddcutil environment
+```
+
+and check the permissions on the `/dev/i2c-*` device associated with the
+monitor. On systems that still use the traditional `i2c` group, add your user
+to it and then log out and back in:
 
 ```bash
 sudo usermod -aG i2c "$USER"
-```
-
-Log out and back in (or reboot), then confirm:
-
-```bash
-groups   # should list i2c
-ddcutil detect
 ```
 
 ### 3. Run the GUI
@@ -60,14 +76,21 @@ That script finds a usable Python venv (or creates one under `~/venvs/monitor-br
 
 ```bash
 # Debian / Ubuntu
-sudo apt install python3 python3-venv python3-tk python3-pip ddcutil
+sudo apt install python3 python3-venv python3-tk python3-pip ddcutil i2c-tools
 
 # Fedora
-sudo dnf install python3 python3-tkinter python3-pip ddcutil
+sudo dnf install python3 python3-tkinter python3-pip ddcutil i2c-tools
 
 # Arch
-sudo pacman -S python python-tkinter python-pip ddcutil
+sudo pacman -S python python-tkinter python-pip ddcutil i2c-tools
 ```
+
+- The Linux implementation controls **external DDC/CI monitors**. A laptop's
+  built-in eDP panel normally uses the kernel backlight interface instead and
+  will not appear in `ddcutil detect`.
+- If Linux is running inside a VM that only sees a virtual display adapter,
+  the guest normally cannot reach the host GPU's physical I2C/DDC bus. In that
+  case `ddcutil` inside the guest will not control the host's physical monitor.
 
 ---
 
@@ -152,13 +175,20 @@ These scripts target **external monitors**. Laptop built-in displays use a separ
 - Only monitors that respond to DDC/CI are shown. Built-in laptop panels are excluded.
 - Run `ddcutil detect` (Linux) or `-List` (Windows) to confirm detection.
 
-**Linux: permission denied**
+**Linux: monitor access or permission failure**
+
+Run these in order:
 
 ```bash
-sudo ddcutil detect   # test with elevated permissions
+ddcutil detect
+ddcutil getvcp 10 --terse
+ddcutil environment
 ```
 
-If that works, add your user to the `i2c` group (step 2 above) and log out/in.
+If `sudo ddcutil detect` works but `ddcutil detect` does not, the issue is
+device permissions rather than this program. Modern `ddcutil` packages normally
+install udev rules automatically; older/unusual setups may still require the
+`i2c` group method described above.
 
 **Linux: venv / `lib64` Operation not permitted**
 

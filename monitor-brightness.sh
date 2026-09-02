@@ -17,7 +17,7 @@ Control external monitor brightness via DDC/CI.
 
 Options:
   --list, -l                  List detected monitors and current brightness
-  --brightness, -b <0-100>    Target brightness (default: 50)
+  --brightness, -b <0-100>    Target brightness percentage (default: 50)
   --monitor-index, -m <n>     Zero-based monitor index (default: 1)
   --help, -h                  Show this help message
 
@@ -40,21 +40,32 @@ require_ddcutil() {
 
 # Returns display numbers (1-based, as ddcutil uses) one per line.
 get_display_numbers() {
-    ddcutil detect --terse 2>/dev/null \
-        | sed -n 's/^Display \([0-9]*\).*/\1/p' \
-        || true
+    local output
+    if ! output=$(ddcutil detect --terse 2>&1); then
+        echo "Error: ddcutil could not detect monitors:" >&2
+        echo "$output" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$output" \
+        | sed -n 's/^Display[[:space:]]\+\([0-9]\+\).*/\1/p'
 }
 
 get_monitor_name() {
     local display="$1"
     ddcutil detect 2>/dev/null \
         | awk -v d="$display" '
-            $0 ~ "^Display " d "$" { found=1; next }
-            found && /^   Model:/ { print $3; for (i=4; i<=NF; i++) printf " %s", $i; print ""; exit }
-            found && /^Display / { exit }
+            $0 ~ "^Display[[:space:]]+" d "[[:space:]]*$" { found=1; next }
+            found && $0 ~ "^[[:space:]]*Model:" {
+                sub(/^[[:space:]]*Model:[[:space:]]*/, "")
+                print
+                exit
+            }
+            found && /^Display[[:space:]]+[0-9]+/ { exit }
         '
 }
 
+# Prints: current_value max_value
 get_brightness() {
     local display="$1"
     local output
@@ -63,13 +74,41 @@ get_brightness() {
         return 1
     fi
 
-    # Terse format: feature_code current_value max_value ...
-    echo "$output" | awk '{ print $2, $3 }'
+    # ddcutil continuous-feature terse format:
+    #   VCP 10 C 50 100
+    printf '%s\n' "$output" \
+        | awk '
+            toupper($1) == "VCP" &&
+            (toupper($2) == "10" || toupper($2) == "0X10") &&
+            toupper($3) == "C" {
+                print $4, $5
+                found=1
+                exit
+            }
+            END { if (!found) exit 1 }
+        '
+}
+
+percent_to_value() {
+    local percent="$1"
+    local maximum="$2"
+
+    awk -v p="$percent" -v max="$maximum" '
+        BEGIN {
+            value = (max * p / 100.0)
+            printf "%d\n", int(value + 0.5)
+        }
+    '
 }
 
 list_monitors() {
     local index=0
     local display
+    local display_output
+
+    if ! display_output=$(get_display_numbers); then
+        exit 1
+    fi
 
     printf "%-5s %-30s %-20s %-18s %-13s %s\n" \
         "Index" "Name" "BrightnessSupported" "CurrentBrightness" "MinBrightness" "MaxBrightness"
@@ -84,8 +123,8 @@ list_monitors() {
         local brightness_info
         if brightness_info=$(get_brightness "$display"); then
             local current max
-            current=$(echo "$brightness_info" | awk '{ print $1 }')
-            max=$(echo "$brightness_info" | awk '{ print $2 }')
+            current=$(awk '{ print $1 }' <<<"$brightness_info")
+            max=$(awk '{ print $2 }' <<<"$brightness_info")
             printf "%-5s %-30s %-20s %-18s %-13s %s\n" \
                 "$index" "$name" "True" "$current" "0" "$max"
         else
@@ -94,39 +133,65 @@ list_monitors() {
         fi
 
         index=$((index + 1))
-    done < <(get_display_numbers)
+    done <<<"$display_output"
 
     if [[ "$index" -eq 0 ]]; then
-        echo "No DDC/CI-capable monitors detected." >&2
+        echo "No DDC/CI-capable external monitors detected." >&2
+        echo "Try: ddcutil environment" >&2
         exit 1
     fi
 }
 
 set_brightness() {
-    if [[ "$BRIGHTNESS" -lt 0 || "$BRIGHTNESS" -gt 100 ]]; then
-        echo "Error: Brightness must be between 0 and 100." >&2
+    if ! [[ "$BRIGHTNESS" =~ ^[0-9]+$ ]] || [[ "$BRIGHTNESS" -lt 0 || "$BRIGHTNESS" -gt 100 ]]; then
+        echo "Error: Brightness must be an integer between 0 and 100." >&2
+        exit 1
+    fi
+
+    if ! [[ "$MONITOR_INDEX" =~ ^[0-9]+$ ]]; then
+        echo "Error: Monitor index must be a non-negative integer." >&2
+        exit 1
+    fi
+
+    local display_output
+    if ! display_output=$(get_display_numbers); then
         exit 1
     fi
 
     local displays=()
     while IFS= read -r display; do
         [[ -n "$display" ]] && displays+=("$display")
-    done < <(get_display_numbers)
+    done <<<"$display_output"
 
     if [[ "${#displays[@]}" -eq 0 ]]; then
-        echo "Error: No DDC/CI-capable monitors detected." >&2
+        echo "Error: No DDC/CI-capable external monitors detected." >&2
+        echo "Try: ddcutil environment" >&2
         exit 1
     fi
 
-    if [[ "$MONITOR_INDEX" -lt 0 || "$MONITOR_INDEX" -ge "${#displays[@]}" ]]; then
+    if [[ "$MONITOR_INDEX" -ge "${#displays[@]}" ]]; then
         echo "Error: Invalid monitor index. Use --list to see available indexes." >&2
         exit 1
     fi
 
     local display="${displays[$MONITOR_INDEX]}"
+    local brightness_info
+    if ! brightness_info=$(get_brightness "$display"); then
+        echo "Error: Display $display did not return VCP brightness feature 0x10." >&2
+        echo "Check that DDC/CI is enabled in the monitor menu." >&2
+        exit 1
+    fi
 
-    if ! ddcutil --display "$display" setvcp 10 "$BRIGHTNESS" &>/dev/null; then
-        echo "Error: Failed to set brightness. The monitor may not support DDC/CI brightness control, or DDC/CI may be disabled in the monitor menu." >&2
+    local maximum
+    maximum=$(awk '{ print $2 }' <<<"$brightness_info")
+    local target
+    target=$(percent_to_value "$BRIGHTNESS" "$maximum")
+
+    local output
+    if ! output=$(ddcutil --display "$display" setvcp 10 "$target" 2>&1); then
+        echo "Error: Failed to set brightness on Display $display." >&2
+        [[ -n "$output" ]] && echo "$output" >&2
+        echo "Check DDC/CI, I2C permissions, and the monitor connection." >&2
         exit 1
     fi
 }
